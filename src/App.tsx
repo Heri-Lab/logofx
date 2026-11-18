@@ -1,9 +1,8 @@
 import { useEffect } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { AIPanel } from "@/components/AIPanel";
 import { Canvas } from "@/components/Canvas";
-import { Sidebar } from "@/components/Sidebar";
-import { currentGridKey, transformOf, useEditor } from "@/store/editor";
+import { DesignPanel, LeftPanel } from "@/components/Sidebar";
+import { BUILTIN_CAMERAS, currentGridKey, transformOf, useEditor } from "@/store/editor";
 import { useNotice } from "@/store/notice";
 import { canvasApi } from "@/lib/canvas-api";
 import { loadRegions } from "@/lib/regions";
@@ -19,10 +18,10 @@ export default function App() {
 
   return (
     <TooltipProvider>
-      <div className="flex h-dvh gap-2 bg-background p-2">
-        {showAI && <AIPanel />}
+      <div className="flex h-dvh bg-background">
+        {showAI && <LeftPanel />}
         <Canvas />
-        {showLibrary && <Sidebar />}
+        {showLibrary && <DesignPanel />}
       </div>
       <Notice />
     </TooltipProvider>
@@ -34,7 +33,7 @@ function Notice() {
   if (!text) return null;
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-24 z-50 flex justify-center" role="status" aria-live="polite">
-      <div key={id} className="animate-rise rounded-full border border-border bg-popover/95 px-4 py-2 text-[13px] shadow-xl shadow-black/30 backdrop-blur-xl">
+      <div key={id} className="animate-rise rounded-xl border border-border bg-popover px-4 py-2 text-xs shadow-xl shadow-black/35">
         {text}
       </div>
     </div>
@@ -59,8 +58,16 @@ function useShortcuts() {
         case "v": case "b": s.setTool("paint"); break;
         case "h": s.setTool("pan"); break;
         case "e": s.setTool("erase"); break;
+        case "o": s.setTool("orbit"); break;
+        case "x": s.setTool("extrude"); break;
         case "p": s.togglePreview(); break;
-        case "t": if (!s.tilePreview) canvasApi.revealTiles(); s.toggleTilePreview(); break;
+        case "t": if (s.tilePreview) canvasApi.hideTiles(); else { s.toggleTilePreview(); canvasApi.revealTiles(); } break;
+        default:
+          // 1–9 switch cameras on the 3D canvas.
+          if (s.view3d.enabled && /^[1-9]$/.test(e.key)) {
+            const cam = [...BUILTIN_CAMERAS, ...s.cameras][+e.key - 1];
+            if (cam) s.applyCamera(cam.id);
+          }
       }
     };
     window.addEventListener("keydown", onKey);

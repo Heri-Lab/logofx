@@ -1,16 +1,23 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { PanelRight, Sparkles, X } from "lucide-react";
+import { Suspense, lazy, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { PanelLeft, PanelRight, X } from "lucide-react";
 import { traceUnion, useRegions, type RegionSet } from "@/lib/regions";
 import { GRID_SPACE, gridPathOf, hasPerspective, isIdentity, transformMatrix, type GridTransform } from "@/lib/templates";
 import { projectedGridPath } from "@/lib/project";
 import { carryFills } from "@/lib/transition";
-import { EMPTY_FILLS, useEditor, useTransform, useView, type Fills } from "@/store/editor";
+import { EMPTY_FILLS, activeFill, editableLayer, sameFill, useEditor, useTransform, useView, type Fills } from "@/store/editor";
+import { stackByLayer } from "@/lib/layers";
+import { faceAt } from "@/lib/faces";
+import { CanvasMenu, type MenuTarget } from "@/components/CanvasMenu";
+import { notify } from "@/store/notice";
 import { Button } from "@/components/ui/button";
 import { Tip } from "@/components/ui/tooltip";
 import { Toolbar } from "@/components/Toolbar";
 import { cn } from "@/lib/utils";
 import { canvasApi } from "@/lib/canvas-api";
 import { attachTileCanvas, drawTiles, setTileArt } from "@/lib/tiles";
+
+// three.js only loads the first time the canvas is tilted into 3D.
+const Scene3D = lazy(() => import("@/components/Scene3D"));
 
 /** Artboard size in CSS px at 100% zoom. */
 const BASE = 640;
@@ -31,6 +38,7 @@ export function Canvas() {
   const tool = useEditor((s) => s.tool);
   const preview = useEditor((s) => s.preview);
   const hintDismissed = useEditor((s) => s.hintDismissed);
+  const is3D = useEditor((s) => s.view3d.enabled);
   const transform = useTransform();
   const { regions, loading } = useRegions(templateId, density, transform, carryFills);
   const regionsRef = useRef<RegionSet | null>(regions);
@@ -40,6 +48,7 @@ export function Canvas() {
 
   const view = useRef<View>({ x: 0, y: 0, s: 1 });
   const userMoved = useRef(false);
+  const beforeTiles = useRef<{ view: View; moved: boolean } | null>(null);
   const frame = useRef(0);
   const anim = useRef(0);
   const idle = useRef(0);
@@ -88,7 +97,7 @@ export function Canvas() {
   }, []);
 
   const animateTo = useCallback(
-    (target: View, duration = 240) => {
+    (target: View, duration = 240, onDone?: () => void) => {
       cancelAnimationFrame(anim.current);
       const from = { ...view.current };
       const t0 = performance.now();
@@ -97,6 +106,7 @@ export function Canvas() {
         view.current = { x: from.x + (target.x - from.x) * k, y: from.y + (target.y - from.y) * k, s: from.s + (target.s - from.s) * k };
         schedule();
         if (k < 1) anim.current = requestAnimationFrame(step);
+        else onDone?.();
       };
       anim.current = requestAnimationFrame(step);
     },
@@ -116,10 +126,21 @@ export function Canvas() {
     canvasApi.revealTiles = () => {
       const target = fitView().s / 3;
       if (view.current.s <= target * 1.05) return;
+      beforeTiles.current = { view: { ...view.current }, moved: userMoved.current };
       userMoved.current = true;
       // Keep the artboard centred while zooming out.
       const cx = view.current.x + (BASE * view.current.s) / 2, cy = view.current.y + (BASE * view.current.s) / 2;
       animateTo({ s: target, x: cx - (BASE * target) / 2, y: cy - (BASE * target) / 2 }, 420);
+    };
+    canvasApi.hideTiles = () => {
+      const prev = beforeTiles.current;
+      beforeTiles.current = null;
+      // Zoom back to where the reveal started (or the fitted view) with the same easing and
+      // duration, and only then fade the tiles out.
+      userMoved.current = prev?.moved ?? false;
+      animateTo(prev?.moved ? prev.view : fitView(), 420, () => {
+        if (useEditor.getState().tilePreview) useEditor.getState().toggleTilePreview();
+      });
     };
     canvasApi.zoomBy = (f) => {
       const vp = viewportRef.current!;
@@ -217,9 +238,15 @@ export function Canvas() {
     const { lx, ly } = toStage(e.clientX, e.clientY);
     const id = regionAt(lx, ly);
     if (id < 0 || !regionsRef.current) return;
+    const layer = ed.layers.find((l) => l.id === ed.activeLayer);
+    if (tool !== "erase" && layer && !editableLayer(ed.layers, layer.id)) {
+      notify(`“${layer.name}” is ${layer.locked ? "locked" : "hidden"}. Pick another layer to paint.`);
+      return;
+    }
     const key = activeKey();
     const cur = ed.fills[key] ?? EMPTY_FILLS;
-    const color = tool === "erase" || cur[id] === ed.ink ? null : ed.ink;
+    const value = activeFill(ed);
+    const color = tool === "erase" || sameFill(cur[id], value) ? null : value;
     ed.beginStroke(key);
     ed.strokeApply(key, [id], color);
     gesture.current = { kind: "paint", color, lx, ly };
@@ -284,13 +311,24 @@ export function Canvas() {
     }
   };
 
+  /** Right-click: the face under the pointer (connected shapes with one fill), or the empty shape. */
+  const menuTarget = (clientX: number, clientY: number): MenuTarget => {
+    const rs = regionsRef.current;
+    const { lx, ly } = toStage(clientX, clientY);
+    const id = regionAt(lx, ly);
+    if (!rs || id < 0) return null;
+    const fills = useEditor.getState().fills[rs.key] ?? EMPTY_FILLS;
+    return { key: rs.key, ids: fills[id] === undefined ? [id] : faceAt(rs, fills, id) };
+  };
+
   const cursor =
     dragging === "pan" ? "cursor-grabbing" : tool === "pan" || spaceHeld ? "cursor-grab" : regions ? "cursor-crosshair" : "cursor-progress";
 
   return (
-    <main className="relative min-w-0 flex-1 overflow-hidden rounded-xl border border-border bg-card">
+    <main className="relative min-w-0 flex-1 overflow-hidden bg-background">
       <TilePreview />
       <StageGuides ref={guidesRef} />
+      <CanvasMenu resolve={menuTarget}>
       <div
         ref={viewportRef}
         className={cn("absolute inset-0 touch-none select-none", cursor)}
@@ -299,7 +337,6 @@ export function Canvas() {
         onPointerUp={endPointer}
         onPointerCancel={endPointer}
         onPointerLeave={() => !gesture.current && useView.getState().setHover(-1)}
-        onContextMenu={(e) => e.preventDefault()}
         onDoubleClick={(e) => { if (tool === "pan") { e.preventDefault(); canvasApi.fit(); } }}
       >
         <div ref={stageRef} className="absolute left-0 top-0 origin-top-left" style={{ width: BASE, height: BASE }}>
@@ -308,12 +345,19 @@ export function Canvas() {
           {loading && <div className="pointer-events-none absolute inset-0 animate-shimmer rounded-sm" />}
         </div>
       </div>
+      </CanvasMenu>
 
-      {!hintDismissed && (
-        <div className="pointer-events-none absolute inset-x-0 top-6 flex justify-center">
-          <div className="pointer-events-auto flex h-11 animate-rise items-center gap-3 rounded-full border border-border bg-muted/80 pl-4 pr-1.5 text-[13px] shadow-lg shadow-black/20 backdrop-blur-xl">
+      {is3D && (
+        <Suspense fallback={<div className="absolute inset-0 animate-shimmer" />}>
+          <Scene3D />
+        </Suspense>
+      )}
+
+      {!hintDismissed && !is3D && (
+        <div className="pointer-events-none absolute inset-x-0 top-5 flex justify-center">
+          <div className="pointer-events-auto flex h-10 animate-rise items-center gap-3 rounded-xl border border-border bg-card pl-4 pr-1.5 text-[13px] shadow-lg shadow-black/35">
             Your grid defines the shapes. Click a shape to fill it, drag to fill many.
-            <Button variant="ghost" size="icon-sm" className="rounded-full" onClick={() => useEditor.getState().dismissHint()} aria-label="Dismiss">
+            <Button variant="ghost" size="icon-sm" className="size-6" onClick={() => useEditor.getState().dismissHint()} aria-label="Dismiss">
               <X />
             </Button>
           </div>
@@ -339,20 +383,24 @@ const Artwork = memo(function Artwork({ regions }: { regions: RegionSet }) {
   );
 });
 
+/** [packed fill value, path] — the value carries both the layer and the colour. */
+type Group = readonly [string, string];
+
 const FillLayer = memo(function FillLayer({ regions, fills }: { regions: RegionSet; fills: Fills }) {
-  // Live: concatenated per-region paths (instant). Idle: per-colour union traced in the
+  // Live: concatenated per-region paths (instant). Idle: per-fill union traced in the
   // worker, which removes every internal seam and matches the exported SVG exactly.
-  const [union, setUnion] = useState<{ fills: Fills; key: string; groups: (readonly [string, string])[] } | null>(null);
+  const layers = useEditor((s) => s.layers);
+  const [union, setUnion] = useState<{ fills: Fills; key: string; groups: Group[] } | null>(null);
   const live = useMemo(() => {
     const by = new Map<string, string[]>();
-    for (const [id, color] of Object.entries(fills)) {
+    for (const [id, v] of Object.entries(fills)) {
       const d = regions.paths[+id];
       if (!d) continue;
-      let arr = by.get(color);
-      if (!arr) by.set(color, (arr = []));
+      let arr = by.get(v);
+      if (!arr) by.set(v, (arr = []));
       arr.push(d);
     }
-    return [...by.entries()].map(([color, ds]) => [color, ds.join("")] as const);
+    return [...by.entries()].map(([v, ds]) => [v, ds.join("")] as const);
   }, [regions, fills]);
 
   useEffect(() => {
@@ -361,31 +409,36 @@ const FillLayer = memo(function FillLayer({ regions, fills }: { regions: RegionS
     let alive = true;
     const t = window.setTimeout(async () => {
       const by = new Map<string, number[]>();
-      for (const [id, c] of entries) (by.get(c) ?? by.set(c, []).get(c)!).push(+id);
-      const colors = [...by.keys()];
-      const res = await traceUnion(regions.key, colors.map((c) => by.get(c)!));
-      if (alive) setUnion({ fills, key: regions.key, groups: res.paths.map((d, i) => [colors[i], d] as const) });
+      for (const [id, v] of entries) (by.get(v) ?? by.set(v, []).get(v)!).push(+id);
+      const values = [...by.keys()];
+      const res = await traceUnion(regions.key, values.map((v) => by.get(v)!));
+      if (alive) setUnion({ fills, key: regions.key, groups: res.paths.map((d, i) => [values[i], d] as const) });
     }, 140);
     return () => { alive = false; window.clearTimeout(t); };
   }, [regions.key, fills]);
 
   const settled = union && union.fills === fills && union.key === regions.key;
   const groups = settled ? union.groups : live;
-  useEffect(() => { setTileArt(groups); }, [groups]);
+  const stack = useMemo(() => stackByLayer(groups, layers), [groups, layers]);
+  useEffect(() => { setTileArt(stack.flatMap(({ groups: g }) => g)); }, [stack]);
   return (
     <g>
-      {groups.map(([color, d]) => (
-        <path
-          key={color}
-          d={d}
-          fillRule="evenodd"
-          fill={color}
-          // While live, a same-colour hairline hides anti-aliasing seams between neighbours.
-          stroke={settled ? "none" : color}
-          strokeWidth={settled ? 0 : 1}
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
+      {stack.map(({ layer, groups: g }) => (
+        <g key={layer.id} opacity={layer.opacity / 100} style={layer.blend === "normal" ? undefined : { mixBlendMode: layer.blend }}>
+          {g.map(([color, d]) => (
+            <path
+              key={color}
+              d={d}
+              fillRule="evenodd"
+              fill={color}
+              // While live, a same-colour hairline hides anti-aliasing seams between neighbours.
+              stroke={settled ? "none" : color}
+              strokeWidth={settled ? 0 : 1}
+              strokeLinejoin="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          ))}
+        </g>
       ))}
     </g>
   );
@@ -395,11 +448,12 @@ function HoverLayer({ regions, fills }: { regions: RegionSet; fills: Fills }) {
   const hover = useView((s) => s.hover);
   const tool = useEditor((s) => s.tool);
   const ink = useEditor((s) => s.ink);
+  const value = useEditor(activeFill);
   const enabled = useEditor((s) => s.hoverPreview);
   if (!enabled || hover < 0 || tool === "pan") return null;
   const d = regions.paths[hover];
   if (!d) return null;
-  const erasing = tool === "erase" || fills[hover] === ink;
+  const erasing = tool === "erase" || sameFill(fills[hover], value);
   return erasing ? (
     <path d={d} fillRule="evenodd" fill="#000" fillOpacity={fills[hover] ? 0.28 : 0} stroke="#fff" strokeOpacity={0.35} strokeWidth={1} vectorEffect="non-scaling-stroke" />
   ) : (
@@ -469,19 +523,19 @@ function CornerButtons() {
   const showLibrary = useEditor((s) => s.showLibrary);
   return (
     <>
-      <Tip label={showAI ? "Hide AI assistant" : "Show AI assistant"} side="right">
+      <Tip label={showAI ? "Hide layers & assistant" : "Show layers & assistant"} side="right">
         <Button
           variant="outline"
           size="icon"
-          className={cn("absolute bottom-6 left-5 size-10 rounded-full bg-card", showAI && "text-brand")}
+          className={cn("absolute bottom-5 left-4 size-10 rounded-xl border-border bg-card shadow-lg shadow-black/35 hover:bg-muted", showAI && "text-foreground")}
           onClick={() => useEditor.getState().toggleAI()}
-          aria-label="Toggle AI assistant"
+          aria-label="Toggle left panel"
         >
-          <Sparkles />
+          <PanelLeft />
         </Button>
       </Tip>
-      <Tip label={showLibrary ? "Hide grids" : "Show grids"} side="left">
-        <Button variant="outline" size="icon" className="absolute bottom-6 right-5 size-10 rounded-full bg-card" onClick={() => useEditor.getState().toggleLibrary()} aria-label="Toggle grid library">
+      <Tip label={showLibrary ? "Hide design panel" : "Show design panel"} side="left">
+        <Button variant="outline" size="icon" className="absolute bottom-5 right-4 size-10 rounded-xl border-border bg-card shadow-lg shadow-black/35 hover:bg-muted" onClick={() => useEditor.getState().toggleLibrary()} aria-label="Toggle design panel">
           <PanelRight />
         </Button>
       </Tip>
