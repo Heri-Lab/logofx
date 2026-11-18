@@ -3,8 +3,12 @@ import { notify } from "@/store/notice";
 import { loadRegions, traceUnion } from "./regions";
 import { GRID_SPACE, gridPathOf, hasPerspective, transformMatrix } from "./templates";
 import { projectedGridPath } from "./project";
+import { stackByLayer } from "./layers";
+import { canvasApi } from "./canvas-api";
 
-export type ExportKind = "svg" | "png" | "copy";
+const escapeXml = (s: string) => s.replace(/[<>&"]/g, (c) => `&#${c.charCodeAt(0)};`);
+
+export type ExportKind = "svg" | "png" | "copy" | "png3d";
 const OUT = 1024;
 
 async function buildSvg() {
@@ -16,16 +20,23 @@ async function buildSvg() {
   if (!entries.length) return null;
   if (!(await loadRegions(s.templateId, s.density, t))) return null;
 
-  const byColor = new Map<string, number[]>();
-  for (const [id, c] of entries) {
-    const arr = byColor.get(c) ?? [];
+  const byValue = new Map<string, number[]>();
+  for (const [id, v] of entries) {
+    const arr = byValue.get(v) ?? [];
     arr.push(+id);
-    byColor.set(c, arr);
+    byValue.set(v, arr);
   }
-  const colors = [...byColor.keys()];
-  const { paths } = await traceUnion(key, colors.map((c) => byColor.get(c)!));
+  const values = [...byValue.keys()];
+  const { paths } = await traceUnion(key, values.map((v) => byValue.get(v)!));
   const res = GRID_SPACE;
-  const shapes = paths.map((d, i) => `<path d="${d}" fill="${colors[i]}" fill-rule="evenodd"/>`).join("");
+  // One <g> per visible layer, bottom to top, carrying its opacity and blend mode.
+  const shapes = stackByLayer(paths.map((d, i) => [values[i], d] as const), s.layers)
+    .map(({ layer, groups }) => {
+      const attrs = `${layer.opacity < 100 ? ` opacity="${layer.opacity / 100}"` : ""}${layer.blend !== "normal" ? ` style="mix-blend-mode:${layer.blend}"` : ""}`;
+      return `<g id="${escapeXml(layer.name)}"${attrs}>${groups.map(([color, d]) => `<path d="${d}" fill="${color}" fill-rule="evenodd"/>`).join("")}</g>`;
+    })
+    .join("");
+  if (!shapes) return null;
   const guides = s.guidesOnExport
     ? `<defs><clipPath id="artboard"><rect width="${res}" height="${res}"/></clipPath></defs><g clip-path="url(#artboard)"><path d="${hasPerspective(t) ? projectedGridPath(s.templateId, s.density, t) : gridPathOf(s.templateId, s.density, t)}"${hasPerspective(t) ? "" : ` transform="matrix(${transformMatrix(t).join(" ")})"`} fill="none" stroke="${s.lineColor}" stroke-opacity="${Math.max(0.04, s.lineOpacity / 100)}" stroke-width="${res / OUT}" vector-effect="non-scaling-stroke"/></g>`
     : "";
@@ -41,6 +52,12 @@ function download(blob: Blob, name: string) {
 }
 
 export async function exportDrawing(kind: ExportKind) {
+  if (kind === "png3d") {
+    const blob = await canvasApi.snapshot3D();
+    if (!blob) return notify("Turn on 3D to export the 3D view.");
+    download(blob, "logo-3d.png");
+    return notify("Exported logo-3d.png");
+  }
   const svg = await buildSvg();
   if (!svg) return notify("Nothing to export yet — fill a few shapes first.");
   if (kind === "copy") {

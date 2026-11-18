@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Tip } from "@/components/ui/tooltip";
 import { Popover, PopoverClose, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useChat, type Message } from "@/store/chat";
-import { useEditor, useGridKey, useTransform, useView } from "@/store/editor";
+import { activeFill, unpackFill, useEditor, useGridKey, useTransform, useView } from "@/store/editor";
 import { conceptRegions, useConceptRegions, useRegions } from "@/lib/regions";
 import { getTemplate } from "@/lib/templates";
 import { STYLES, type Concept } from "@/lib/shapes";
@@ -12,7 +12,11 @@ import { cn } from "@/lib/utils";
 
 const SUGGESTIONS = ["Make it bolder with thicker shapes", "Try a monogram with the letters LF", "A mascot badge for a coffee shop"];
 
-export function AIPanel() {
+/**
+ * The assistant. In the Assistant tab it shows the whole chat; elsewhere in the left panel only
+ * its prompt stays pinned at the bottom (same instance, so a half-typed prompt survives).
+ */
+export function AIPanel({ expanded, onSend }: { expanded: boolean; onSend?: () => void }) {
   const chats = useChat((s) => s.chats);
   const activeId = useChat((s) => s.activeId);
   const credits = useChat((s) => s.credits);
@@ -44,6 +48,7 @@ export function AIPanel() {
     pinned.current = true;
     useChat.getState().send(text, gridName);
     setDraft("");
+    onSend?.();
   };
   const refine = () => {
     setDraft("Refine: ");
@@ -59,19 +64,20 @@ export function AIPanel() {
   }, [draft]);
 
   return (
-    <aside className="flex w-[340px] shrink-0 flex-col overflow-hidden rounded-xl border border-border bg-card">
-      <header className="flex items-center gap-1 px-4 py-3">
+    <div className={cn("flex flex-col", expanded ? "min-h-0 flex-1" : "shrink-0 border-t border-border pt-3")}>
+      {expanded && (<>
+      <header className="flex h-10 shrink-0 items-center gap-0.5 border-b border-border pl-2 pr-3">
         <ChatHistory />
         <Tip label="New chat">
           <Button variant="ghost" size="icon-sm" aria-label="New chat" className="text-muted-foreground" onClick={() => { useChat.getState().newChat(); inputRef.current?.focus(); }}>
             <Plus />
           </Button>
         </Tip>
-        <span className="ml-2 truncate text-[13px] font-medium text-foreground/90">{chat?.title}</span>
+        <span className="ml-1.5 truncate text-[11px] font-semibold">{chat?.title}</span>
         <span className={cn("ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground", credits <= 1 && "text-destructive")}>{credits} credits</span>
       </header>
 
-      <div ref={scrollRef} onScroll={onScroll} className="scroll-area min-h-0 flex-1 px-5 pb-6 pt-1">
+      <div ref={scrollRef} onScroll={onScroll} className="scroll-area min-h-0 flex-1 px-4 pb-6 pt-3">
         {!chat?.messages.length ? (
           <div className="flex h-full flex-col items-center justify-center px-6 text-center">
             <div className="mb-3 grid size-9 place-items-center rounded-lg bg-brand/10 text-brand"><Sparkles className="size-4" /></div>
@@ -83,7 +89,7 @@ export function AIPanel() {
             {chat.messages.map((m) =>
               m.role === "user" ? (
                 <div key={m.id} className="flex animate-rise justify-end">
-                  <p className="max-w-[86%] whitespace-pre-wrap rounded-lg bg-muted px-3 py-2.5 text-[13px] leading-[1.45]">{m.text}</p>
+                  <p className="max-w-[86%] whitespace-pre-wrap rounded-md bg-muted px-3 py-2 text-xs leading-[1.45]">{m.text}</p>
                 </div>
               ) : (
                 <AssistantMessage key={m.id} message={m} onRefine={refine} onLayout={() => scrollToEnd()} />
@@ -98,9 +104,10 @@ export function AIPanel() {
           </div>
         )}
       </div>
+      </>)}
 
-      <div className="flex flex-col gap-2 px-4 pb-4">
-        {(chat?.messages.length ?? 0) < 4 && (
+      <div className="flex flex-col gap-2 px-3 pb-3">
+        {expanded && (chat?.messages.length ?? 0) < 4 && (
           <div className="flex flex-col">
             {SUGGESTIONS.map((s) => (
               <button key={s} onClick={() => send(s)} disabled={pending || credits <= 0} className="flex items-center gap-2 rounded-sm px-1 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40">
@@ -110,7 +117,7 @@ export function AIPanel() {
             ))}
           </div>
         )}
-        <div className="flex flex-col gap-3 rounded-lg border border-input bg-background p-3 transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20">
+        <div className="flex flex-col gap-2.5 rounded-md border border-transparent bg-muted p-2.5 transition-[border-color] focus-within:border-ring">
           <textarea
             ref={inputRef}
             value={draft}
@@ -119,17 +126,17 @@ export function AIPanel() {
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }}
             placeholder={credits > 0 ? "Describe a logo, or ask to refine the canvas…" : "You’re out of credits"}
             disabled={credits <= 0}
-            className="scroll-area resize-none bg-transparent text-[13px] leading-[1.45] outline-none placeholder:text-muted-foreground"
+            className="scroll-area resize-none bg-transparent text-xs leading-[1.45] outline-none placeholder:text-muted-foreground"
           />
           <div className="flex items-center justify-between">
             <StylePicker />
-            <Button size="icon-sm" aria-label="Send" disabled={!draft.trim() || pending || credits <= 0} onClick={() => send()}>
+            <Button size="icon-sm" className="size-6" aria-label="Send" disabled={!draft.trim() || pending || credits <= 0} onClick={() => send()}>
               <ArrowUp />
             </Button>
           </div>
         </div>
       </div>
-    </aside>
+    </div>
   );
 }
 
@@ -213,20 +220,22 @@ function AssistantMessage({ message: m, onRefine, onLayout }: { message: Message
   }, [streaming, m.text]);
   const done = shown >= m.text.length;
   const key = useGridKey();
-  const ink = useEditor((s) => s.ink);
-
   const place = async (index: number) => {
     const concept = m.concepts?.[index];
     if (!concept) return;
     const ids = await conceptRegions(key, concept);
     useChat.getState().select(m.id, index);
-    useEditor.getState().commit(key, Object.fromEntries(ids.map((i) => [i, ink])));
+    // The concept replaces the active layer; other layers keep their shapes.
+    const ed = useEditor.getState();
+    const others = Object.entries(ed.fills[key] ?? {}).filter(([, v]) => unpackFill(v).layer !== ed.activeLayer);
+    const fill = activeFill(ed);
+    ed.commit(key, { ...Object.fromEntries(others), ...Object.fromEntries(ids.map((i) => [i, fill])) });
     useView.getState().setGhost(null);
   };
 
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-[13px] leading-normal text-muted-foreground">
+      <p className="text-xs leading-normal text-muted-foreground">
         {m.text.slice(0, shown)}
         {!done && <span className="ml-0.5 inline-block h-3.5 w-px translate-y-0.5 animate-pulse bg-muted-foreground" />}
       </p>

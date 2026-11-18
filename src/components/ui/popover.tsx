@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Popover as P, DropdownMenu as D } from "radix-ui";
+import { ContextMenu as C, Popover as P, DropdownMenu as D } from "radix-ui";
 import { cn } from "@/lib/utils";
 
 const surface =
@@ -37,3 +37,44 @@ export function DropdownMenuItem({ className, ...props }: React.ComponentProps<t
   );
 }
 export const DropdownMenuSeparator = () => <D.Separator className="-mx-1 my-1 h-px bg-border" />;
+
+/* Context menu (right-click), Figma-style: compact rows with shortcuts on the right. */
+const menuItem =
+  "flex h-7 cursor-default select-none items-center gap-2 rounded-[4px] px-2 text-[11px] outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-40 data-[highlighted]:bg-primary data-[highlighted]:text-primary-foreground [&_svg]:size-3.5 [&_svg]:text-muted-foreground data-[highlighted]:[&_svg]:text-primary-foreground";
+export const ContextMenu = C.Root;
+export const ContextMenuTrigger = C.Trigger;
+export const ContextMenuSub = C.Sub;
+export function ContextMenuContent({ className, ...props }: React.ComponentProps<typeof C.Content>) {
+  return (
+    <C.Portal>
+      <C.Content className={cn(surface, "min-w-52 bg-popover", className)} {...props} />
+    </C.Portal>
+  );
+}
+export function ContextMenuItem({ className, shortcut, children, ...props }: React.ComponentProps<typeof C.Item> & { shortcut?: string }) {
+  return (
+    <C.Item className={cn(menuItem, className)} {...props}>
+      {children}
+      {shortcut && <span className="ml-auto pl-4 text-[10px] tracking-wide opacity-60">{shortcut}</span>}
+    </C.Item>
+  );
+}
+export function ContextMenuSubTrigger({ className, children, ...props }: React.ComponentProps<typeof C.SubTrigger>) {
+  return (
+    <C.SubTrigger className={cn(menuItem, "data-[state=open]:bg-accent", className)} {...props}>
+      {children}
+      <span className="ml-auto pl-4 text-muted-foreground">›</span>
+    </C.SubTrigger>
+  );
+}
+export function ContextMenuSubContent({ className, ...props }: React.ComponentProps<typeof C.SubContent>) {
+  return (
+    <C.Portal>
+      <C.SubContent className={cn(surface, "min-w-44 bg-popover", className)} {...props} />
+    </C.Portal>
+  );
+}
+export const ContextMenuLabel = ({ children }: { children: React.ReactNode }) => (
+  <C.Label className="flex h-6 items-center gap-1.5 px-2 text-[10px] font-medium text-muted-foreground">{children}</C.Label>
+);
+export const ContextMenuSeparator = () => <C.Separator className="-mx-1 my-1 h-px bg-border" />;
